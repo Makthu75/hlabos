@@ -5,7 +5,7 @@ set -euo pipefail
 # Konfig
 # ======================================================
 UBU_VERSION="${UBU_VERSION:-24.04.3}"
-UBU_RELEASE="${UBU_RELEASE:noble}"
+UBU_RELEASE="${UBU_RELEASE:-noble}"
 ISO_URL="${ISO_URL:-https://releases.ubuntu.com/${UBU_RELEASE}/ubuntu-${UBU_VERSION}-live-server-amd64.iso}"
 ISO_NAME="ubuntu-${UBU_VERSION}-live-server-amd64.iso"
 
