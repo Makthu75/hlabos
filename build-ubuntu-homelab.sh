@@ -4,7 +4,7 @@ set -euo pipefail
 # ======================================================
 # Konfig
 # ======================================================
-UBU_VERSION="${UBU_VERSION:-24.04.3}"
+UBU_VERSION="${UBU_VERSION:-24.04}"
 ISO_URL="${ISO_URL:-https://releases.ubuntu.com/${UBU_VERSION}/ubuntu-${UBU_VERSION}-live-server-amd64.iso}"
 ISO_NAME="ubuntu-${UBU_VERSION}-live-server-amd64.iso"
 
@@ -68,7 +68,7 @@ ensure_pkgs() {
 }
 
 ensure_apt
-# Build-Tooling + Komfort
+# Build-Tooling + Komfort (isolinux/syslinux-utils sind optional, schaden aber nicht)
 BUILD_PKGS=(xorriso isolinux syslinux-utils wget ca-certificates libarchive-tools)
 ensure_pkgs "${BUILD_PKGS[@]}"
 
@@ -99,7 +99,6 @@ if [[ $MOUNT_RC -eq 0 ]]; then
   $SUDO umount "$MOUNTDIR"
 else
   echo "Loop-Mount nicht möglich (Container?). Nutze Fallback mit bsdtar."
-  # libarchive-tools liefert bsdtar
   bsdtar -C "$WORKDIR" -xf "$ISO_NAME"
 fi
 
@@ -257,10 +256,22 @@ if [[ -f "$WORKDIR/isolinux/txt.cfg" ]]; then
   sed -i 's|\(append .*\) ---|\1 autoinstall ds=nocloud;s=/cdrom/nocloud/ ---|g' "$WORKDIR/isolinux/txt.cfg"
 fi
 
-# Pfad zur isohybrid MBR prüfen (isolinux Paket liefert das)
-ISOHDPFX="/usr/lib/ISOLINUX/isohdpfx.bin"
-if [[ ! -f "$ISOHDPFX" ]]; then
-  echo "Warnung: $ISOHDPFX nicht gefunden. Prüfe, ob 'isolinux' installiert ist."
+# ======================================================
+# Boot-Dateien erkennen (GRUB-only vs. isolinux)
+# ======================================================
+BIOS_ELTORITO="boot/grub/i386-pc/eltorito.img"
+UEFI_IMG="boot/grub/efi.img"
+ISOHDPFX="/usr/lib/ISOLINUX/isohdpfx.bin"  # optional; wird nur verwendet, wenn vorhanden
+
+USE_ISOLINUX=0
+if [[ -f "$WORKDIR/isolinux/isolinux.bin" ]]; then
+  USE_ISOLINUX=1
+fi
+if [[ ! -f "$WORKDIR/$BIOS_ELTORITO" ]]; then
+  echo "Warnung: $BIOS_ELTORITO nicht gefunden. BIOS-Boot-Image könnte fehlen."
+fi
+if [[ ! -f "$WORKDIR/$UEFI_IMG" ]]; then
+  echo "Warnung: $UEFI_IMG nicht gefunden. UEFI-Boot-Image könnte fehlen."
 fi
 
 # ======================================================
@@ -268,17 +279,35 @@ fi
 # ======================================================
 echo "Baue neue ISO: $OUT_ISO"
 pushd "$WORKDIR" >/dev/null
-xorriso -as mkisofs \
-  -r -V "$VOLID" \
-  -o "$OUT_ISO" \
-  -J -l -iso-level 3 -cache-inodes \
-  -isohybrid-mbr "$ISOHDPFX" \
-  -partition_offset 16 \
-  -b isolinux/isolinux.bin -c isolinux/boot.cat \
-  -no-emul-boot -boot-load-size 4 -boot-info-table \
-  -eltorito-alt-boot \
-  -e boot/grub/efi.img -no-emul-boot \
-  .
+
+if [[ $USE_ISOLINUX -eq 1 ]]; then
+  # Ältere ISOs mit isolinux
+  xorriso -as mkisofs \
+    -r -V "$VOLID" \
+    -o "$OUT_ISO" \
+    -J -l -iso-level 3 \
+    ${ISOHDPFX:+-isohybrid-mbr "$ISOHDPFX"} \
+    -partition_offset 16 \
+    -b isolinux/isolinux.bin -c isolinux/boot.cat \
+    -no-emul-boot -boot-load-size 4 -boot-info-table \
+    -eltorito-alt-boot \
+    -e "$UEFI_IMG" -no-emul-boot \
+    .
+else
+  # Moderne Ubuntu-Live-ISOs (GRUB für BIOS und UEFI)
+  xorriso -as mkisofs \
+    -r -V "$VOLID" \
+    -o "$OUT_ISO" \
+    -J -l -iso-level 3 \
+    ${ISOHDPFX:+-isohybrid-mbr "$ISOHDPFX"} \
+    -partition_offset 16 \
+    -b "$BIOS_ELTORITO" \
+    -no-emul-boot -boot-load-size 4 -boot-info-table \
+    -eltorito-alt-boot \
+    -e "$UEFI_IMG" -no-emul-boot \
+    .
+fi
+
 popd >/dev/null
 
 echo "Fertig: $OUT_ISO"
