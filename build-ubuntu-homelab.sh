@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ======================================================
+# =========================
 # Konfig
-# ======================================================
+# =========================
 UBU_VERSION="${UBU_VERSION:-24.04.3}"
 ISO_URL="${ISO_URL:-https://releases.ubuntu.com/${UBU_VERSION}/ubuntu-${UBU_VERSION}-live-server-amd64.iso}"
 ISO_NAME="ubuntu-${UBU_VERSION}-live-server-amd64.iso"
 
 WORKDIR="${WORKDIR:-$HOME/iso-work}"
-MOUNTDIR="${MOUNTDIR:-$HOME/iso-mount}"
 OUT_ISO="${OUT_ISO:-$HOME/ubuntu-homelab-${UBU_VERSION}.iso}"
 VOLID="${VOLID:-UBUNTU-HOMELAB}"
 
@@ -40,106 +39,66 @@ EXTRA_PACKAGES=(
 USB_DEVICE="${1:-}"     # z.B. /dev/sdb
 FORCE="${2:-}"          # --force = ohne Rückfrage schreiben
 
-# SUDO Helper (im Container evtl. nicht vorhanden)
-SUDO="sudo"
-if [[ $EUID -eq 0 ]]; then SUDO=""; fi
+SUDO="sudo"; [[ $EUID -eq 0 ]] && SUDO=""
 
-# ======================================================
-# Abhängigkeiten sicherstellen (apt)
-# ======================================================
-ensure_apt() {
-  if ! command -v apt-get >/dev/null 2>&1; then
-    echo "Dieses Script erwartet ein Debian/Ubuntu-ähnliches System mit apt-get."
-    exit 1
-  fi
-}
-
+# =========================
+# Abhängigkeiten
+# =========================
+need_apt() { command -v apt-get >/dev/null 2>&1 || { echo "apt-get benötigt"; exit 1; }; }
 ensure_pkgs() {
-  local pkgs=("$@")
-  local missing=()
-  for p in "${pkgs[@]}"; do
-    dpkg -s "$p" >/dev/null 2>&1 || missing+=("$p")
-  done
-  if ((${#missing[@]})); then
-    echo "Installiere fehlende Pakete: ${missing[*]}"
+  local miss=()
+  for p in "$@"; do dpkg -s "$p" >/dev/null 2>&1 || miss+=("$p"); done
+  if ((${#miss[@]})); then
     $SUDO apt-get update -y
-    DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y --no-install-recommends "${missing[@]}"
+    DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y --no-install-recommends "${miss[@]}"
   fi
 }
+need_apt
+# p7zip-full zum gezielten Extrahieren einzelner Dateien aus der ISO
+ensure_pkgs xorriso p7zip-full wget ca-certificates
 
-ensure_apt
-# Build-Tooling + Komfort
-# Hinweis: isolinux/syslinux-utils sind nicht zwingend, schaden aber nicht.
-BUILD_PKGS=(xorriso wget ca-certificates libarchive-tools p7zip-full isolinux syslinux-utils)
-ensure_pkgs "${BUILD_PKGS[@]}"
+mkdir -p "$WORKDIR"
 
-# Werkverzeichnisse
-mkdir -p "$WORKDIR" "$MOUNTDIR"
-
-# ======================================================
+# =========================
 # ISO holen
-# ======================================================
+# =========================
 if [[ ! -f "$ISO_NAME" ]]; then
   echo "Lade Ubuntu ISO: $ISO_URL"
   wget -O "$ISO_NAME" "$ISO_URL"
 fi
 
-# ======================================================
-# ISO entpacken (Mount → Fallback bsdtar)
-# ======================================================
-echo "Entpacke ISO nach $WORKDIR ..."
-rm -rf "$WORKDIR"/*
-set +e
-$SUDO umount "$MOUNTDIR" 2>/dev/null
-$SUDO mount -o loop "$ISO_NAME" "$MOUNTDIR" 2>/dev/null
-MOUNT_RC=$?
-set -e
-
-if [[ $MOUNT_RC -eq 0 ]]; then
-  cp -aT "$MOUNTDIR" "$WORKDIR"
-  $SUDO umount "$MOUNTDIR"
-else
-  echo "Loop-Mount nicht möglich (Container?). Nutze Fallback mit bsdtar."
-  bsdtar -C "$WORKDIR" -xf "$ISO_NAME"
+# =========================
+# grub.cfg aus der ISO finden & extrahieren
+# =========================
+TMPDIR="$(mktemp -d)"
+GRUB_PATH=""
+# Liste der Dateien anzeigen und Pfad zu grub.cfg herausfischen
+if 7z l "$ISO_NAME" >/tmp/iso.lst 2>/dev/null; then
+  GRUB_PATH="$(awk '/boot\/grub\/grub.cfg$/{print $NF}' /tmp/iso.lst | head -n1 || true)"
 fi
-
-# ======================================================
-# Sicherstellen, dass die GRUB-Boot-Images vorhanden sind
-# (einige Extraktionspfade im LXC verlieren diese Dateien; wir ziehen sie dann gezielt mit 7z nach)
-# ======================================================
-BIOS_ELTORITO_REL="boot/grub/i386-pc/eltorito.img"
-UEFI_IMG_REL="boot/grub/efi.img"
-
-mkdir -p "$WORKDIR/boot/grub/i386-pc"
-
-if [[ ! -f "$WORKDIR/$UEFI_IMG_REL" ]]; then
-  echo "EFI-Boot-Image fehlt → extrahiere mit 7z"
-  7z e -y -o"$WORKDIR/boot/grub" "$ISO_NAME" "$UEFI_IMG_REL" >/dev/null || true
+if [[ -z "$GRUB_PATH" ]]; then
+  echo "Konnte boot/grub/grub.cfg in der ISO nicht finden."; exit 1
 fi
-if [[ ! -f "$WORKDIR/$BIOS_ELTORITO_REL" ]]; then
-  echo "BIOS El Torito-Image fehlt → extrahiere mit 7z"
-  7z e -y -o"$WORKDIR/boot/grub/i386-pc" "$ISO_NAME" "$BIOS_ELTORITO_REL" >/dev/null || true
-fi
+# Datei extrahieren (Pfad innerhalb der ISO ohne führenden Slash)
+7z x -y -o"$TMPDIR" "$ISO_NAME" "$GRUB_PATH" >/dev/null
+[[ -f "$TMPDIR/$GRUB_PATH" ]] || { echo "Extraktion von $GRUB_PATH fehlgeschlagen"; exit 1; }
 
-if [[ ! -f "$WORKDIR/$UEFI_IMG_REL" ]]; then
-  echo "FEHLER: $UEFI_IMG_REL konnte nicht bereitgestellt werden."
-  echo "Tipp: Prüfe, ob die heruntergeladene ISO vollständig ist oder versuche das Script außerhalb von LXC."
-  exit 1
-fi
-if [[ ! -f "$WORKDIR/$BIOS_ELTORITO_REL" ]]; then
-  echo "Warnung: $BIOS_ELTORITO_REL fehlt weiterhin. Das Ergebnis-ISO bootet ggf. nur im UEFI-Modus."
-fi
+# =========================
+# grub.cfg patchen (Autoinstall-Parameter anhängen)
+# =========================
+sed -i 's|\(linux .*\) ---|\1 autoinstall ds=nocloud;s=/cdrom/nocloud/ ---|g' "$TMPDIR/$GRUB_PATH"
 
-# ======================================================
-# NoCloud seed einbetten
-# ======================================================
-mkdir -p "$WORKDIR/nocloud"
+# =========================
+# NoCloud-Seed bauen
+# =========================
+NOCLOUD_DIR="$TMPDIR/nocloud"
+mkdir -p "$NOCLOUD_DIR"
 
-cat > "$WORKDIR/nocloud/meta-data" <<'EOF'
+cat > "$NOCLOUD_DIR/meta-data" <<'EOF'
 instance-id: ubuntu-homelab
 EOF
 
-USER_DATA="$WORKDIR/nocloud/user-data"
+USER_DATA="$NOCLOUD_DIR/user-data"
 {
   echo "#cloud-config"
   echo "autoinstall:"
@@ -271,79 +230,34 @@ EOT'
     - curtin in-target -- /usr/sbin/ufw --force enable || true
 EOF
 
-# ======================================================
-# Boot-Menüs patchen (GRUB)
-# ======================================================
-GRUB_CFG="$WORKDIR/boot/grub/grub.cfg"
-if [[ -f "$GRUB_CFG" ]]; then
-  echo "Patche $GRUB_CFG ..."
-  sed -i 's|\(linux.*\) ---|\1 autoinstall ds=nocloud;s=/cdrom/nocloud/ ---|g' "$GRUB_CFG"
-fi
+# =========================
+# Neues ISO bauen – Bootstrukturen der Original-ISO beibehalten
+# =========================
+echo "Baue neue ISO (Bootdaten behalten): $OUT_ISO"
+# Pfade für xorriso:
+#   - gemappte grub.cfg (ersetzen)
+#   - komplette nocloud/ unter /nocloud
+xorriso -indev "$ISO_NAME" -outdev "$OUT_ISO" \
+  -map "$TMPDIR/$GRUB_PATH" "/$GRUB_PATH" \
+  -map "$NOCLOUD_DIR" /nocloud \
+  -boot_image any keep \
+  -volid "$VOLID" \
+  -J -l -rockridge on
 
-# ======================================================
-# ISO neu bauen (GRUB-only; isolinux nur falls vorhanden)
-# ======================================================
-BIOS_ELTORITO="boot/grub/i386-pc/eltorito.img"
-UEFI_IMG="boot/grub/efi.img"
-ISOHDPFX="/usr/lib/ISOLINUX/isohdpfx.bin"  # optional
-
-echo "Baue neue ISO: $OUT_ISO"
-pushd "$WORKDIR" >/dev/null
-
-if [[ -f "isolinux/isolinux.bin" ]]; then
-  # Mit isolinux (falls vorhanden) + UEFI
-  xorriso -as mkisofs \
-    -r -V "$VOLID" \
-    -o "$OUT_ISO" \
-    -J -l -iso-level 3 \
-    ${ISOHDPFX:+-isohybrid-mbr "$ISOHDPFX"} \
-    -partition_offset 16 \
-    -b isolinux/isolinux.bin -c isolinux/boot.cat \
-    -no-emul-boot -boot-load-size 4 -boot-info-table \
-    -eltorito-alt-boot \
-    -e "$UEFI_IMG" -no-emul-boot \
-    .
-else
-  # Nur GRUB (Ubuntu 22.04+/24.04+)
-  xorriso -as mkisofs \
-    -r -V "$VOLID" \
-    -o "$OUT_ISO" \
-    -J -l -iso-level 3 \
-    ${ISOHDPFX:+-isohybrid-mbr "$ISOHDPFX"} \
-    -partition_offset 16 \
-    -b "$BIOS_ELTORITO" \
-    -no-emul-boot -boot-load-size 4 -boot-info-table \
-    -eltorito-alt-boot \
-    -e "$UEFI_IMG" -no-emul-boot \
-    .
-fi
-
-popd >/dev/null
 echo "Fertig: $OUT_ISO"
 
-# ======================================================
+# =========================
 # Optional: auf USB schreiben
-# ======================================================
+# =========================
 if [[ -n "$USB_DEVICE" ]]; then
   if [[ ! -b "$USB_DEVICE" ]]; then
-    echo "Fehler: $USB_DEVICE ist kein Blockgerät."
-    exit 1
+    echo "Fehler: $USB_DEVICE ist kein Blockgerät."; exit 1
   fi
-
-  # Sicherheitshinweis
-  RM_FLAG=$(lsblk -no RM "$USB_DEVICE" 2>/dev/null || echo 0)
-  if [[ "$RM_FLAG" != "1" ]]; then
-    echo "Warnung: $USB_DEVICE wirkt nicht wie ein Wechseldatenträger (RM=$RM_FLAG)."
+  if [[ "$FORCE" != "--force" ]]; then
+    echo ">>> ACHTUNG: Schreibe ISO auf ${USB_DEVICE} (ALLE Daten weg!)"
+    read -p "Weiter mit dd? Tippe YES: " REPLY
+    [[ "$REPLY" == "YES" ]] || { echo "Abgebrochen."; exit 1; }
   fi
-
-  if [[ "$FORCE" == "--force" ]]; then
-    echo ">>> Schreibe ISO auf ${USB_DEVICE} (FORCE-Modus, keine Rückfrage) ..."
-  else
-    echo ">>> ACHTUNG: Schreibe ISO auf ${USB_DEVICE} (ALLE Daten dort gehen verloren!)"
-    read -p "Weiter mit dd? Tippe YES in Großbuchstaben: " REPLY
-    [[ "$REPLY" == "YES" ]] || { echo "Abgebrochen vor dd."; exit 1; }
-  fi
-
   $SUDO dd if="$OUT_ISO" of="$USB_DEVICE" bs=4M status=progress oflag=sync
   sync
   echo "USB-Stick ist bereit."
