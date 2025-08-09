@@ -4,7 +4,7 @@ set -euo pipefail
 # =========================
 # Konfig
 # =========================
-UBU_VERSION="${UBU_VERSION:-24.04.3}"
+UBU_VERSION="${UBU_VERSION:-24.04.3}"  # z.B. 24.04, 24.04.3
 ISO_URL="${ISO_URL:-https://releases.ubuntu.com/${UBU_VERSION}/ubuntu-${UBU_VERSION}-live-server-amd64.iso}"
 ISO_NAME="ubuntu-${UBU_VERSION}-live-server-amd64.iso"
 
@@ -54,15 +54,19 @@ ensure_pkgs() {
   fi
 }
 need_apt
-# p7zip-full zum gezielten Extrahieren einzelner Dateien aus der ISO
+# xorriso = Pflicht; p7zip-full = zum gezielten Extrahieren einzelner Dateien; wget/ca-certs = Download
 ensure_pkgs xorriso p7zip-full wget ca-certificates
 
 mkdir -p "$WORKDIR"
+TMPDIR="$(mktemp -d)"
+trap 'rm -rf "$TMPDIR"' EXIT
 
 # =========================
-# ISO holen
+# ISO holen (falls nicht schon vorhanden)
 # =========================
-if [[ ! -f "$ISO_NAME" ]]; then
+if [[ -f "$ISO_NAME" ]]; then
+  echo "ISO vorhanden, überspringe Download: $ISO_NAME"
+else
   echo "Lade Ubuntu ISO: $ISO_URL"
   wget -O "$ISO_NAME" "$ISO_URL"
 fi
@@ -70,16 +74,13 @@ fi
 # =========================
 # grub.cfg aus der ISO finden & extrahieren
 # =========================
-TMPDIR="$(mktemp -d)"
 GRUB_PATH=""
-# Liste der Dateien anzeigen und Pfad zu grub.cfg herausfischen
 if 7z l "$ISO_NAME" >/tmp/iso.lst 2>/dev/null; then
   GRUB_PATH="$(awk '/boot\/grub\/grub.cfg$/{print $NF}' /tmp/iso.lst | head -n1 || true)"
 fi
 if [[ -z "$GRUB_PATH" ]]; then
   echo "Konnte boot/grub/grub.cfg in der ISO nicht finden."; exit 1
 fi
-# Datei extrahieren (Pfad innerhalb der ISO ohne führenden Slash)
 7z x -y -o"$TMPDIR" "$ISO_NAME" "$GRUB_PATH" >/dev/null
 [[ -f "$TMPDIR/$GRUB_PATH" ]] || { echo "Extraktion von $GRUB_PATH fehlgeschlagen"; exit 1; }
 
@@ -234,16 +235,13 @@ EOF
 # Neues ISO bauen – Bootstrukturen der Original-ISO beibehalten
 # =========================
 echo "Baue neue ISO (Bootdaten behalten): $OUT_ISO"
-# Pfade für xorriso:
-#   - gemappte grub.cfg (ersetzen)
-#   - komplette nocloud/ unter /nocloud
 xorriso -indev "$ISO_NAME" -outdev "$OUT_ISO" \
   -map "$TMPDIR/$GRUB_PATH" "/$GRUB_PATH" \
   -map "$NOCLOUD_DIR" /nocloud \
   -boot_image any keep \
   -volid "$VOLID" \
-  -J -l -rockridge on
-
+  -joliet on \
+  -rockridge on
 echo "Fertig: $OUT_ISO"
 
 # =========================
