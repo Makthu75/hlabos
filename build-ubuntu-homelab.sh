@@ -5,7 +5,8 @@ set -euo pipefail
 # Konfig
 # =========================
 UBU_VERSION="${UBU_VERSION:-24.04.3}"  # z.B. 24.04, 24.04.3
-ISO_URL="${ISO_URL:-https://releases.ubuntu.com/${UBU_VERSION}/ubuntu-${UBU_VERSION}-live-server-amd64.iso}"
+ISO_URL_DEFAULT="https://releases.ubuntu.com/${UBU_VERSION}/ubuntu-${UBU_VERSION}-live-server-amd64.iso"
+ISO_URL="${ISO_URL:-$ISO_URL_DEFAULT}"
 ISO_NAME="ubuntu-${UBU_VERSION}-live-server-amd64.iso"
 
 WORKDIR="${WORKDIR:-$HOME/iso-work}"
@@ -54,7 +55,7 @@ ensure_pkgs() {
   fi
 }
 need_apt
-# xorriso = Pflicht; p7zip-full = zum gezielten Extrahieren einzelner Dateien; wget/ca-certs = Download
+# xorriso = Pflicht; p7zip-full = ISO-Dateiliste/Extraktion; wget/ca-certs = Download
 ensure_pkgs xorriso p7zip-full wget ca-certificates
 
 mkdir -p "$WORKDIR"
