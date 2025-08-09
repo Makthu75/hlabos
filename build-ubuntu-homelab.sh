@@ -13,6 +13,10 @@ WORKDIR="${WORKDIR:-$HOME/iso-work}"
 OUT_ISO="${OUT_ISO:-$HOME/ubuntu-homelab-${UBU_VERSION}.iso}"
 VOLID="${VOLID:-UBUNTU-HOMELAB}"
 
+# Voreinstellungen (werden im Installer angezeigt, sind aber änderbar)
+DEF_LOCALE="${DEF_LOCALE:-de_DE.UTF-8}"
+DEF_KEYBOARD_LAYOUT="${DEF_KEYBOARD_LAYOUT:-de}"
+DEF_TIMEZONE="${DEF_TIMEZONE:-Europe/Berlin}"
 DEF_HOSTNAME="${DEF_HOSTNAME:-homelab}"
 DEF_USERNAME="${DEF_USERNAME:-admin}"
 
@@ -105,23 +109,38 @@ USER_DATA="$NOCLOUD_DIR/user-data"
   echo "#cloud-config"
   echo "autoinstall:"
   echo "  version: 1"
-  echo "  locale: de_DE.UTF-8"
-  echo "  keyboard:"
-  echo "    layout: de"
-  echo "  timezone: Europe/Berlin"
 
+  # Diese Sektionen sind INTERAKTIV (im TUI) – mit unseren Defaults:
   echo "  interactive-sections:"
+  echo "    - locale"
+  echo "    - keyboard"
+  echo "    - timezone"
   echo "    - identity"
+  echo "    - ssh"
   echo "    - network"
   echo "    - storage"
+
+  # Defaults (änderbar im TUI)
+  echo "  locale: ${DEF_LOCALE}"
+  echo "  keyboard:"
+  echo "    layout: ${DEF_KEYBOARD_LAYOUT}"
+  echo "  timezone: ${DEF_TIMEZONE}"
 
   echo "  identity:"
   echo "    hostname: ${DEF_HOSTNAME}"
   echo "    username: ${DEF_USERNAME}"
+  # Passwort absichtlich NICHT gesetzt -> Installationsdialog fragt nach
 
+  # SSH: interaktiv, aber mit sinnvoller Vorbelegung
+  echo "  ssh:"
+  echo "    install-server: true"
+  echo "    allow-pw: true"
+
+  # Pakete
   echo "  packages:"
   for p in "${EXTRA_PACKAGES[@]}"; do echo "    - $p"; done
 
+  # NetworkManager als Renderer (Startwerte folgen unten)
   echo "  network:"
   echo "    version: 2"
   echo "    renderer: NetworkManager"
@@ -148,19 +167,24 @@ else
 EOF
 fi
 
-# Late-Commands
+# =========================
+# Late-Commands (Dienste aktivieren, Updates, mDNS, Firewall)
+# =========================
 cat >> "$USER_DATA" <<'EOF'
 
   late-commands:
     # Nutzergruppen
     - curtin in-target -- /usr/bin/usermod -aG libvirt,lxd,libvirt-qemu,kvm ${DEF_USERNAME}
 
-    # NetworkManager aktivieren
+    # SSH sicherstellen (falls der Installer es nicht automatisch enabled)
+    - curtin in-target -- /usr/bin/systemctl enable --now ssh || true
+
+    # NetworkManager aktivieren & alles managen lassen
     - curtin in-target -- /usr/bin/systemctl enable --now NetworkManager
     - curtin in-target -- /bin/bash -c 'mkdir -p /etc/NetworkManager/conf.d; echo -e "[keyfile]\nunmanaged-devices=none" > /etc/NetworkManager/conf.d/manage-all.conf || true'
     - curtin in-target -- /usr/bin/systemctl reload NetworkManager || true
 
-    # Dienste aktivieren
+    # Standarddienste aktivieren
     - curtin in-target -- /usr/bin/systemctl enable --now docker || true
     - curtin in-target -- /usr/bin/systemctl enable --now smbd nmbd || true
     - curtin in-target -- /usr/bin/systemctl enable --now nfs-server || true
