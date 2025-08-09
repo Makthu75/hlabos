@@ -68,8 +68,9 @@ ensure_pkgs() {
 }
 
 ensure_apt
-# Build-Tooling + Komfort (isolinux/syslinux-utils sind optional, schaden aber nicht)
-BUILD_PKGS=(xorriso isolinux syslinux-utils wget ca-certificates libarchive-tools)
+# Build-Tooling + Komfort
+# Hinweis: isolinux/syslinux-utils sind nicht zwingend, schaden aber nicht.
+BUILD_PKGS=(xorriso wget ca-certificates libarchive-tools p7zip-full isolinux syslinux-utils)
 ensure_pkgs "${BUILD_PKGS[@]}"
 
 # Werkverzeichnisse
@@ -100,6 +101,33 @@ if [[ $MOUNT_RC -eq 0 ]]; then
 else
   echo "Loop-Mount nicht möglich (Container?). Nutze Fallback mit bsdtar."
   bsdtar -C "$WORKDIR" -xf "$ISO_NAME"
+fi
+
+# ======================================================
+# Sicherstellen, dass die GRUB-Boot-Images vorhanden sind
+# (einige Extraktionspfade im LXC verlieren diese Dateien; wir ziehen sie dann gezielt mit 7z nach)
+# ======================================================
+BIOS_ELTORITO_REL="boot/grub/i386-pc/eltorito.img"
+UEFI_IMG_REL="boot/grub/efi.img"
+
+mkdir -p "$WORKDIR/boot/grub/i386-pc"
+
+if [[ ! -f "$WORKDIR/$UEFI_IMG_REL" ]]; then
+  echo "EFI-Boot-Image fehlt → extrahiere mit 7z"
+  7z e -y -o"$WORKDIR/boot/grub" "$ISO_NAME" "$UEFI_IMG_REL" >/dev/null || true
+fi
+if [[ ! -f "$WORKDIR/$BIOS_ELTORITO_REL" ]]; then
+  echo "BIOS El Torito-Image fehlt → extrahiere mit 7z"
+  7z e -y -o"$WORKDIR/boot/grub/i386-pc" "$ISO_NAME" "$BIOS_ELTORITO_REL" >/dev/null || true
+fi
+
+if [[ ! -f "$WORKDIR/$UEFI_IMG_REL" ]]; then
+  echo "FEHLER: $UEFI_IMG_REL konnte nicht bereitgestellt werden."
+  echo "Tipp: Prüfe, ob die heruntergeladene ISO vollständig ist oder versuche das Script außerhalb von LXC."
+  exit 1
+fi
+if [[ ! -f "$WORKDIR/$BIOS_ELTORITO_REL" ]]; then
+  echo "Warnung: $BIOS_ELTORITO_REL fehlt weiterhin. Das Ergebnis-ISO bootet ggf. nur im UEFI-Modus."
 fi
 
 # ======================================================
@@ -244,44 +272,26 @@ EOT'
 EOF
 
 # ======================================================
-# Bootmenüs patchen (GRUB/BIOS & GRUB/UEFI)
+# Boot-Menüs patchen (GRUB)
 # ======================================================
 GRUB_CFG="$WORKDIR/boot/grub/grub.cfg"
 if [[ -f "$GRUB_CFG" ]]; then
   echo "Patche $GRUB_CFG ..."
   sed -i 's|\(linux.*\) ---|\1 autoinstall ds=nocloud;s=/cdrom/nocloud/ ---|g' "$GRUB_CFG"
 fi
-if [[ -f "$WORKDIR/isolinux/txt.cfg" ]]; then
-  echo "Patche isolinux/txt.cfg ..."
-  sed -i 's|\(append .*\) ---|\1 autoinstall ds=nocloud;s=/cdrom/nocloud/ ---|g' "$WORKDIR/isolinux/txt.cfg"
-fi
 
 # ======================================================
-# Boot-Dateien erkennen (GRUB-only vs. isolinux)
+# ISO neu bauen (GRUB-only; isolinux nur falls vorhanden)
 # ======================================================
 BIOS_ELTORITO="boot/grub/i386-pc/eltorito.img"
 UEFI_IMG="boot/grub/efi.img"
-ISOHDPFX="/usr/lib/ISOLINUX/isohdpfx.bin"  # optional; wird nur verwendet, wenn vorhanden
+ISOHDPFX="/usr/lib/ISOLINUX/isohdpfx.bin"  # optional
 
-USE_ISOLINUX=0
-if [[ -f "$WORKDIR/isolinux/isolinux.bin" ]]; then
-  USE_ISOLINUX=1
-fi
-if [[ ! -f "$WORKDIR/$BIOS_ELTORITO" ]]; then
-  echo "Warnung: $BIOS_ELTORITO nicht gefunden. BIOS-Boot-Image könnte fehlen."
-fi
-if [[ ! -f "$WORKDIR/$UEFI_IMG" ]]; then
-  echo "Warnung: $UEFI_IMG nicht gefunden. UEFI-Boot-Image könnte fehlen."
-fi
-
-# ======================================================
-# ISO neu bauen
-# ======================================================
 echo "Baue neue ISO: $OUT_ISO"
 pushd "$WORKDIR" >/dev/null
 
-if [[ $USE_ISOLINUX -eq 1 ]]; then
-  # Ältere ISOs mit isolinux
+if [[ -f "isolinux/isolinux.bin" ]]; then
+  # Mit isolinux (falls vorhanden) + UEFI
   xorriso -as mkisofs \
     -r -V "$VOLID" \
     -o "$OUT_ISO" \
@@ -294,7 +304,7 @@ if [[ $USE_ISOLINUX -eq 1 ]]; then
     -e "$UEFI_IMG" -no-emul-boot \
     .
 else
-  # Moderne Ubuntu-Live-ISOs (GRUB für BIOS und UEFI)
+  # Nur GRUB (Ubuntu 22.04+/24.04+)
   xorriso -as mkisofs \
     -r -V "$VOLID" \
     -o "$OUT_ISO" \
@@ -309,7 +319,6 @@ else
 fi
 
 popd >/dev/null
-
 echo "Fertig: $OUT_ISO"
 
 # ======================================================
